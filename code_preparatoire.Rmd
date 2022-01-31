@@ -1,0 +1,96 @@
+---
+title: "Code préparatoire"
+output: html_notebook
+---
+
+# INTIALISATION
+```{r setup}
+invisible(lapply(c("raster", "sf", "leaflet", "stars", "RStoolbox", "sp"), library, character.only=T)) #Importation des packages
+
+chemin="/Users/vincent/Documents/Liv/"
+c_lidar=paste0(chemin, "LiDAR/")
+
+contour=st_read(paste0(chemin, "QGIS/Bon/Zone d'étude.gpkg"))
+
+leaf=leaflet() %>% addTiles() %>% addPolygons(data=st_transform(contour, 4326), col = "grey")
+```
+
+# Coupage du LiDAR par la zone d'étude globale
+```{r}
+contour=st_read(paste0(chemin, "QGIS/Bon/Zone d'étude.gpkg"))
+leaf=leaf %>% addPolygons(data=st_transform(contour, 4326), col = "grey")
+
+lidar=raster(paste0(c_lidar, "AINraster_MV_1_8ha_Meancor_CHM.mean.tif"))
+
+coupe=mask(crop(lidar, extent(contour)), contour)
+crs(coupe)<-2154
+
+leaf %>% addRasterImage(coupe)
+```
+
+# Récupération de toutes les couches LiDAR et coupage
+```{r}
+fichiers_dispo=list.files(paste0(chemin, "LiDAR"), full.names=T)
+
+pattern="AINraster_MV_1_8ha_Meancor_"
+
+s=stack(fichiers_dispo[grepl(pattern, fichiers_dispo)], quick=T)
+names(s)=lapply(names(s), function(x){substr(x, nchar(pattern)+1, nchar(x))})
+
+s=mask(crop(s, extent(contour)), contour)
+s=normImage(s, norm=T)
+
+crs(s)<-2154
+
+leaf %>% addRasterImage(s$CHM.mean)
+```
+
+
+```{r}
+mnt=raster(paste0(c_lidar, "MNT_25m.tif"))
+
+coupe=mask(crop(mnt, extent(contour)), contour)
+crs(coupe)<-2154
+
+coupe=as.data.frame(coupe, xy=T)
+coupe=subset(coupe, coupe$MNT_25m>=600)
+coupe=rasterFromXYZ(coupe)
+crs(coupe)<-2154
+
+leaf %>% addRasterImage(coupe)
+
+#writeRaster(coupe, paste0(chemin, "test.tif"), overwrite=T)
+```
+
+
+```{r}
+test=st_as_sf(st_as_stars(coupe), as_points=F, merge=T)
+test=st_union(test)
+
+leaf %>% addPolygons(data=st_transform(test, 4326))
+
+#À  donner aux élèves sous forme de fonction : 
+test=st_cast(test, "POLYGON")
+polygone_a_garder=sort.int(st_area(test), decreasing=T, index.return=T)$ix
+test=test[[1]][[polygone_a_garder[polygone_a_garder==1]]]
+test=st_polygon(list(test))
+test=st_sfc(test)
+test=st_as_sf(test)
+st_crs(test)=2154
+
+leaf %>% addPolygons(data=st_transform(test, 4326))
+```
+
+
+```{r}
+s_600=mask(crop(s, extent(test)), test)
+
+leaf %>% addRasterImage(s_600$CHM.mean)
+```
+
+
+
+
+
+
+
