@@ -1,0 +1,188 @@
+---
+title: "Code élève"
+author: "Vincent Gardet"
+output: html_document
+---
+
+# INTIALISATION
+## Divers
+```{r setup}
+invisible(lapply(c("raster", "sf", "leaflet", "stars", "RStoolbox", "sp", "spsurvey", "htmlwidgets", "htmltools", "spatstat", "maxnet", "parallel", "foreach", "doSNOW", "doParallel"), library, character.only=T)) #Importation des packages
+
+chemin="/Users/vincent/Documents/Initiation_QGIS_R/"
+
+contour=st_read(paste0(chemin, "QGIS/Ressources/Zone d'étude.gpkg"))
+map=leaflet() %>% addTiles() %>% addPolygons(data=st_transform(contour, 4326), col="grey")
+print(map)
+```
+
+## Importation des fichiers
+```{r}
+contour_mnt_600=readRDS(paste0(chemin, "R/Sauvegarde_objets_R/contour_mnt_600.rds"))
+lidar_stack_600=readRDS(paste0(chemin, "/R/Sauvegarde_objets_R/lidar_stack_600.rds"))
+
+ze_points=readRDS(paste0(chemin, "R/Sauvegarde_objets_R/ze_points.rds"))
+
+bd_topo_ze_elec=readRDS(paste0(chemin, "R/Sauvegarde_objets_R/bd_topo_ze_elec.rds"))
+bd_topo_ze_train=readRDS(paste0(chemin, "R/Sauvegarde_objets_R/bd_topo_ze_train.rds"))
+bd_topo_ze_routes_global=readRDS(paste0(chemin, "R/Sauvegarde_objets_R/bd_topo_ze_routes_global.rds"))
+bd_topo_ze_autoroutes=readRDS(paste0(chemin, "R/Sauvegarde_objets_R/bd_topo_ze_autoroutes.rds"))
+bd_topo_ze_routes=readRDS(paste0(chemin, "R/Sauvegarde_objets_R/bd_topo_ze_routes.rds"))
+bd_topo_ze_chemins=readRDS(paste0(chemin, "R/Sauvegarde_objets_R/bd_topo_ze_chemins.rds"))
+
+points_presence=st_read(paste0(chemin, "R/Objets_extraits_de_R/Vecteurs/points_presence.gpkg"))
+
+predicteurs_selectionnes=c("H.max", "Gha", "propConifG2", "CHM.mean", "G.s1000_Inf", "G.s200_1000", "G.s20_200", "Tree.density", "CHM0.sd", "altitude")
+```
+
+
+
+
+
+
+
+# MODÈLES
+## Préparation des fichiers
+```{r}
+lidar_stack_600_light<-subset(lidar_stack_600, predicteurs_selectionnes)
+
+traces=st_read(paste0(chemin, "QGIS/Ressources/Traces GPS.gpkg"))
+#map %>% addPolylines(data=st_transform(traces, 4326))
+```
+
+## Distribution des points de présence par rapport à la distance à l'observateur
+```{r}
+#Distance de détection de la chevechette par rapport à la trace
+dist_detection=rnorm(2*20000/3, mean=80, sd=50)
+dist_detection=c(dist_detection, rnorm(20000/3, mean=80, sd=75))
+dist_detection[dist_detection<=0]=abs(dist_detection[dist_detection<=0])
+#hist(dist_detection)
+```
+
+## Création des points d'absence
+```{r}
+#Background points creation
+background_points=list()
+seuils=seq(12.5, 200, by=12.5)
+
+ze_points=st_sf(data.frame(ze_points))
+
+for(i in 1:length(seuils)){
+  seuil=seuils[i]
+  
+  traces_buffer=st_union(st_buffer(traces, seuil))
+  temp=st_union(st_buffer(traces, seuil-12.5))
+  traces_buffer=st_difference(traces_buffer, temp)
+  map %>% addPolygons(data=st_transform(traces_buffer, 4326))
+  
+  ze_points_traces=ze_points[as.numeric(data.frame(st_intersects(ze_points, traces_buffer))$row.id), ]
+  #map %>% addPolygons(data=st_transform(traces_buffer, 4326)) %>% addCircles(data=st_transform(ze_points_traces, 4326), col='black')
+  
+  if(seuil!=200){n_pts_echant=length(dist_detection[dist_detection>(seuil-12.5) & dist_detection<seuil])} else {n_pts_echant=length(dist_detection[dist_detection>seuil])}
+  
+  pts_echant=spsurvey::grts(ze_points_traces, n_base=n_pts_echant, seltype="equal")
+  background_points[[i]]=pts_echant$sites_base
+  
+  print(map %>% 
+          addCircles(data=st_transform(pts_echant$sites_base, 4326)) %>% 
+          addControl(tags$div(HTML(as.character(seuil))), position="topright"))
+}
+background_points=do.call(rbind, background_points)
+
+map %>% addCircles(data=st_transform(background_points, 4326))
+#st_write(background_points, paste0(chemin, "R/Objets_extraits_de_R/Vecteurs/background_points.gpkg"))
+
+background_points_table=cbind(background_points, st_coordinates(background_points))
+background_points_table=data.frame(X=background_points_table$X, Y=background_points_table$Y, Pres=0)
+```
+
+
+## Création des rasters de fréquentation
+```{r}
+rm("bd_topo_ze_routes_global")
+
+for(i in ls()[grepl("bd_topo_ze_", ls())]){
+  parametre=substr(i, 12, nchar(i))
+  
+  raster_points=st_coordinates(st_line_sample(st_cast(get(i), "LINESTRING"), density=1))
+  ppp_object=ppp(raster_points[, 1], raster_points[, 2], window=as.owin(contour_mnt_600))
+  
+  if(parametre %in% c("routes", "autoroutes", "routes_global")){sigma=300} else if (parametre=="chemins"){sigma=150} else {sigma=50}
+  
+  old_r=raster(density(ppp_object, sigma=sigma))
+  old_r=resample(old_r, lidar_stack_600_light)
+  crs(old_r)="+proj=lcc +lat_1=49 +lat_2=44 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +units=m +no_defs"
+  
+  plot(old_r)
+  writeRaster(old_r, paste0(chemin, "R/Objets_extraits_de_R/Rasters/", parametre, ".tiff"), overwrite=T)
+  
+  old_r=normImage(old_r)
+  
+  lidar_stack_600_light=addLayer(lidar_stack_600_light, old_r)
+  names(lidar_stack_600_light)=c(names(lidar_stack_600_light)[!(names(lidar_stack_600_light) %in% "layer")], parametre)
+}
+```
+
+## Création du jeu de points de présence et d'absence
+```{r}
+lidar_stack_600_light_table=as.data.frame(rasterToPoints(lidar_stack_600_light))
+
+
+#Presence and absence dataset creation
+##Presence dataframe creation
+points_presence_table=data.frame(st_coordinates(points_presence), Pres=1)
+
+##Absence dataframe creation is done by the function called background_points_creator
+
+##Merge dataframes
+points_presence_absence_table=rbind(points_presence_table, background_points_table) 
+
+
+#Extraction of raster values corresponding to points in the dataframe
+coordinates(points_presence_absence_table)<-~X+Y
+proj4string(points_presence_absence_table)<-st_crs(points_presence_table)$proj4string
+points_presence_absence_table@data<-cbind(points_presence_absence_table@data, extract(lidar_stack_600_light, points_presence_absence_table))
+points_presence_absence_table=as.data.frame(points_presence_absence_table)
+```
+
+
+## Création du modèle
+```{r}
+#Preparing data for Maxnet functions
+vecteur_presence<-as.vector(points_presence_absence_table$Pres)
+predicteurs_table<-points_presence_absence_table[, 4:ncol(points_presence_absence_table)]
+predicteurs_table=predicteurs_table[, colnames(predicteurs_table)!="train"]
+
+#Maxnet model creation
+formula<-maxnet.formula(vecteur_presence, predicteurs_table, classes="link")
+
+localisation_table=lidar_stack_600_light_table[, c("x", "y")]
+
+
+p.wt=rep(1.e-6, nrow(points_presence_absence_table)) 
+p.wt[points_presence_absence_table$Pres==0]=11436/sum(points_presence_absence_table$Pres==0) #1548.81 is the area of Champfromier
+
+dwpr=glm(as.formula(paste0("vecteur_presence", paste0(c(as.character(formula), "+1"), collapse=""))), family=poisson(), 
+        data=points_presence_absence_table)
+betas=data.frame(names(dwpr[["coefficients"]]), dwpr[["coefficients"]])
+
+localisation_table$predicted=predict(dwpr, lidar_stack_600_light_table, type="response")
+
+sd=data.frame(rownames(coef(summary(dwpr))), coef(summary(dwpr))[, "Std. Error"])
+colnames(sd)="predictors"
+rownames(sd)=1:nrow(sd)
+
+
+#Map creation
+map=raster::rasterFromXYZ(localisation_table, res=c(25,25))
+crs(map)<-"+proj=lcc +lat_1=49 +lat_2=44 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +units=m +no_defs"
+plot(map)
+
+
+#Betas_list
+colnames(betas)="predictors"
+rownames(betas)=1:nrow(betas)
+
+
+writeRaster(map, paste0(chemin, "R/Objets_extraits_de_R/Rasters/model.tiff"), overwrite=T)
+```

@@ -5,497 +5,297 @@ output: html_notebook
 
 # INTIALISATION
 ```{r setup}
-invisible(lapply(c("raster", "sf", "leaflet", "stars", "RStoolbox", "sp", "spsurvey"), library, character.only=T)) #Importation des packages
+invisible(lapply(c("raster", "sf", "leaflet", "stars", "RStoolbox", "sp", "spsurvey", "htmlwidgets", "htmltools", "spatstat", "maxnet", "parallel", "foreach", "doSNOW", "doParallel"), library, character.only=T)) #Importation des packages
 
-chemin="/Users/vincent/Documents/Liv/"
-c_lidar=paste0(chemin, "LiDAR/")
+chemin="/Users/vincent/Documents/Initiation_QGIS_R/"
 
-contour=st_read(paste0(chemin, "QGIS/Bon/Zone d'étude.gpkg"))
-
-leaf=leaflet() %>% addTiles() %>% addPolygons(data=st_transform(contour, 4326), col = "grey")
-
-geometry_rebuilder=function(x_column, y_column){
-  geometry=NULL
-  
-  x=unlist(as.numeric(x_column))
-  y=unlist(as.numeric(y_column))
-  
-  for(i in 1:length(x)){geometry=rbind(geometry, st_geometry(st_point(c(x[i], y[i]))))}
-  
-  geometry=st_sfc(geometry)
-  st_crs(geometry)<-2154
-  
-  return(geometry)
-}
+contour=st_read(paste0(chemin, "QGIS/Ressources/Zone d'étude.gpkg"))
+map=leaflet() %>% addTiles() %>% addPolygons(data=st_transform(contour, 4326), col="grey")
+print(map)
 ```
 
-# Récupération de toutes les couches LiDAR et coupage
-```{r}
-fichiers_dispo=list.files(paste0(chemin, "LiDAR/Non triés, pour coupage/"), full.names=T)
-
-pattern="AINraster_MV_1_8ha_Meancor_"
-
-s=stack(fichiers_dispo[grepl(pattern, fichiers_dispo)], quick=T)
-names(s)=lapply(names(s), function(x){substr(x, nchar(pattern)+1, nchar(x))})
-
-s=mask(crop(s, extent(contour)), contour)
-s=normImage(s, norm=T)
-
-crs(s)<-2154
-
-leaf %>% addRasterImage(s$CHM.mean)
-
-for(i in names(s)){
-  writeRaster(s[[i]], paste0(chemin, "LiDAR/Coupés/", i, ".tif"))
-}
-
-```
-
-# Importation du MNT et sélection des zones de plus de 600m d'altitude
-```{r}
-mnt=raster(paste0(c_lidar, "MNT_25m.tif"))
-
-coupe=mask(crop(mnt, extent(contour)), contour)
-crs(coupe)<-2154
-
-coupe=as.data.frame(coupe, xy=T)
-coupe=subset(coupe, coupe$MNT_25m>=600)
-coupe=rasterFromXYZ(coupe)
-crs(coupe)<-2154
-
-leaf %>% addRasterImage(coupe)
-
-#writeRaster(coupe, paste0(chemin, "test.tif"), overwrite=T)
-```
-
-# Création d'un contour des zones à plus de 600m d'altitude
-```{r}
-test=st_as_sf(st_as_stars(coupe), as_points=F, merge=T)
-test=st_union(test)
-
-#leaf %>% addPolygons(data=st_transform(test, 4326))
-
-#À  donner aux élèves sous forme de fonction : 
-test=st_cast(test, "POLYGON")
-polygone_a_garder=sort.int(st_area(test), decreasing=T, index.return=T)$ix
-test=test[[1]][[polygone_a_garder[polygone_a_garder==1]]]
-test=st_polygon(list(test))
-test=st_sfc(test)
-test=st_as_sf(test)
-st_crs(test)=2154
-
-leaf %>% addPolygons(data=st_transform(test, 4326))
-```
-
-# Suppression des zones du LiDAR inférieures à 600m d'altitude
-```{r}
-s_600=mask(crop(s, extent(test)), test)
-
-leaf %>% addRasterImage(s_600$CHM.mean)
-```
-
-
-#Coupage de la BD FORÊT
-```{r}
-bd_foret_ain=st_read(paste0(chemin, "QGIS/Bon/BDFORET_2-0__SHP_LAMB93_D001_2014-04-01/BDFORET/1_DONNEES_LIVRAISON/BDF_2-0_SHP_LAMB93_D001/FORMATION_VEGETALE.shp"))
-
-bd_foret_ze=st_intersection(bd_foret_ain, test)
-
-leaf %>% addPolygons(data=st_transform(bd_foret_ze, 4326))
-```
-
-
-#Création points de présence
-#Intialisation
-```{r}
-ze=suppressWarnings(as(test, "Spatial"))
-
-
-#Création d'une base de points pour l'application du GRTSe
-ze_points=as.data.frame(s_600$CHM.mean, xy=T)
-
-ze_points=geometry_rebuilder(ze_points$x, ze_points$y)
-ze_points=ze_points[st_within(ze_points, test, sparse=F)]
-ze_points=ze_points[-112236]
-
-ze_points_df=data.frame(ze_points)
-```
-
-# Ajout des variables à prendre en compte
-## Altitude
-```{r}
-ze_points_df$altitude=raster::extract(coupe, as_Spatial(ze_points))
-ze_points_df$altitude=exp(ze_points_df$altitude/200) #Facteur multiplicatif bidouillé pour augmenter les probabilités des points les plus hauts d'être tirés
-
-ze_points=st_sf(ze_points_df)
-ze_points=ze_points[!is.na(ze_points$altitude), ]
-
-#leaf %>% addCircles(data=st_transform(ze_points, 4326))
-
-pts_altitude=spsurvey::grts(ze_points, n_base=200, seltype="proportional", aux_var="altitude")
-
-
-# x=data.frame(table(round(ze_points_df$altitude, 0)))
-# write.csv2(x, paste0(chemin, "x.csv"))
-
-
-leaf %>% addCircles(data=st_transform(pts_altitude$sites_base, 4326))
-
-pts_altitude_df=data.frame(pts_altitude$sites_base)
-pts_altitude_df$altitude=raster::extract(coupe, as_Spatial(pts_altitude$sites_base))
-median(pts_altitude_df$altitude)
-
-#st_write(ze_points, paste0(chemin, "/ze_points.gpkg"))
-```
-
-```{r}
-#Création d'une base de points pour l'application du GRTSe
-ze_points=as.data.frame(s_600$CHM.mean, xy=T)
-
-ze_points=geometry_rebuilder(ze_points$x, ze_points$y)
-ze_points=ze_points[st_within(ze_points, test, sparse=F)]
-ze_points=ze_points[-112236]
-
-ze_points_df=data.frame(ze_points)
-
-
-ze_points_df$CHM.mean=raster::extract(s$CHM.mean, as_Spatial(ze_points))
-ze_points_df$CHM.mean=exp(ze_points_df$CHM.mean) #Facteur multiplicatif bidouillé pour augmenter les probabilités des points les plus hauts d'être tirés
-
-ze_points=st_sf(ze_points_df)
-ze_points=ze_points[!is.na(ze_points$CHM.mean), ]
-
-#leaf %>% addCircles(data=st_transform(ze_points, 4326))
-
-pts_altitude=spsurvey::grts(ze_points, n_base=200, seltype="proportional", aux_var="CHM.mean")
-
-
-# x=data.frame(table(round(ze_points_df$altitude, 0)))
-# write.csv2(x, paste0(chemin, "x.csv"))
-
-
-leaf %>% addCircles(data=st_transform(pts_altitude$sites_base, 4326)) %>% addRasterImage(s$CHM.mean)
-
-pts_altitude_df=data.frame(pts_altitude$sites_base)
-pts_altitude_df$altitude=raster::extract(coupe, as_Spatial(pts_altitude$sites_base))
-median(pts_altitude_df$altitude)
-
-#st_write(ze_points, paste0(chemin, "/ze_points.gpkg"))
-```
-
-# Modèles
 ## Fonctions
 ```{r}
-#Append a part of a formula in an existing formula
-append_formula=function(formula, text){as.formula(paste0(as.character(formula)[1], as.character(formula)[2], text))}
-append_formula2=function(text, formula){as.formula(paste0(text, as.character(formula)[1], as.character(formula)[2]))}
+env_cleaner=function(to_clean, to_keep=NA){
+  env_names=names(as.list(.GlobalEnv))
+  to_clean=env_names[grep(to_clean, env_names)]
+  if(!is.na(to_keep)){to_clean=to_clean[to_clean!=to_keep]}
+  rm(list=to_clean, envir=.GlobalEnv)
+}
 
-
-#Rebuild the geometry of an object that isn't that well coded
 geometry_rebuilder=function(x_column, y_column){
   geometry=NULL
   
   x=unlist(as.numeric(x_column))
   y=unlist(as.numeric(y_column))
   
+  # registerDoSNOW(makeCluster(detectCores()))
+  # geometry=foreach(i=1:length(x), .combine=rbind) %dopar% function(i){st_geometry(st_point(c(x[i], y[i])))}
+  # stopCluster(makeCluster(detectCores()))
+  
   for(i in 1:length(x)){geometry=rbind(geometry, st_geometry(st_point(c(x[i], y[i]))))}
-
+  
   geometry=st_sfc(geometry)
   st_crs(geometry)<-2154
   
   return(geometry)
 }
 
-
-#Creation of background_points to ensure correct comparison between models
-background_points_creator=function(time_interval, output="table"){
-  tracks=as(tracks_dataset[tracks_dataset$year %in% time_interval, ], Class="Spatial")
-  tracks@data$PROSPID<-tracks@data$prospid
-  tracks@data$Date_prosp<-tracks@data$date
+raster_contour_redrawer=function(r){
+  r=st_cast(r, "POLYGON")
   
-  background_points<-RANDOM_POINTS(tracks, n=10000, logplineobj=fitlogspline, type="random")
-  background_points<-data.frame(X=background_points$x0, Y=background_points$y0, Pres=0)
+  r2=sort.int(st_area(r), decreasing=T, index.return=T)$ix
+  r=r[[1]][[r2[r2==1]]]
   
-  if(output=="table"){return(background_points)} 
-  else {leaf %>% addCircles(data = st_transform(st_geometry(geometry_rebuilder(background_points[, 1], background_points[, 2])), 4326), col = "black")}
-}
-
-
-#Creation of models
-models=function(model_number, model_method="dwpr", time_interval=study_period, predictors_local=predictors, background_points, environmental_raster=env_r_champ, output="map"){
-  #Creation of all the necessary files
-  ##Keeping only the predictors of the model
-  m_env_r_champ<-subset(environmental_raster, predictors_local)
-  m_env_r_champ_table=as.data.frame(na.omit(rasterToPoints(m_env_r_champ)))
+  r=st_polygon(list(r))
+  r=st_as_sf(st_sfc(r))
+  st_crs(r)=2154
   
-  
-  #Presence and absence dataset creation
-  ##Presence dataframe creation
-  presence_points=data.frame(st_coordinates(points_dataset[points_dataset$Annee %in% time_interval, ]), Pres=1)
-  
-  ##Absence dataframe creation is done by the function called background_points_creator
-  
-  ##Merge dataframes
-  presence_absence_points=rbind(presence_points, background_points) 
-  
-  
-  #Extraction of raster values corresponding to points in the dataframe
-  coordinates(presence_absence_points)<-~X + Y
-  proj4string(presence_absence_points)<-st_crs(points_dataset)$proj4string
-  presence_absence_points@data<-cbind(presence_absence_points@data, extract(m_env_r_champ, presence_absence_points))
-  presence_absence_points=na.omit(as.data.frame(presence_absence_points))
-  
-  #Preparing data for Maxnet functions
-  presence_data<-as.vector(presence_absence_points$Pres)
-  predictors_maxnet<-presence_absence_points[, c(predictors)]
-  
-  #Maxnet model creation
-  formula<-maxnet.formula(presence_data, predictors_maxnet, classes="lq")
-  formula=append_formula(formula, "-I(Ski^2)")
-  
-  predictor=m_env_r_champ_table[, c("x", "y")]
-  
-  if(model_method=="maxent" | model_method=="maxnet"){
-    maxent_model<-maxnet(presence_data, predictors_maxnet, f=formula, regmult=1)
-    betas=data.frame(names(maxent_model[["betas"]]), maxent_model[["betas"]])
-    
-    predictor$predicted=predict(maxent_model, m_env_r_champ_table, type="exponential", clamp=FALSE)[, 1]
-  } else {
-    p.wt=rep(1.e-6, nrow(presence_absence_points)) 
-    p.wt[presence_absence_points$Pres==0]=1548.81/sum(presence_absence_points$Pres==0) #1548.81 is the area of Champfromier
-    
-    dwpr=glm(as.formula(paste0("presence_data/p.wt", paste0(c(as.character(formula), "+1"), collapse=""))), family=poisson(), 
-             weights=p.wt, data=presence_absence_points)
-    betas=data.frame(names(dwpr[["coefficients"]]), dwpr[["coefficients"]])
-    
-    predictor$predicted=predict(dwpr, m_env_r_champ_table, type="response")
-    
-    sd=data.frame(rownames(coef(summary(dwpr))), coef(summary(dwpr))[, "Std. Error"])
-    colnames(sd)=c("predictors", model_number)
-    rownames(sd)=1:nrow(sd)
-  }
-
-  #Map creation
-  map=raster::rasterFromXYZ(predictor, res=c(25,25))
-  crs(map)<-"+proj=lcc +lat_1=49 +lat_2=44 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +units=m +no_defs"
-  
-  
-  #Betas_list
-  colnames(betas)=c("predictors", model_number)
-  rownames(betas)=1:nrow(betas)
-  
-  
-  if(output!="all"){return(get(output))} 
-  else {
-    if(model_method=="maxent" | model_method=="maxnet"){return(list(maxent_model, betas, map))}
-    else {return(list(dwpr, list(betas, sd), map))}}
-}
-
-
-palette=function(object, palette_name="Set1"){return(rep(brewer.pal(n=8, name=palette_name), ceiling(length(object)/8))[1:length(object)])}
-density_gradient_creator=colorRampPalette(c("#000b7e","#f01a72", "#feef22"))
-
-
-#Sorting models betas_table in a custom alphabetical order (by distinguishing "raw" predictors and the squared ones)
-model_table_reorderer=function(table){
-  table=data.frame(table)
-  
-  table_part1=table[substr(table$predictors, 1, 2)!="I(", ]
-  table_part1=table_part1[order(as.character(table_part1$predictors)), ]
-  
-  table_part2=table[substr(table$predictors, 1, 2)=="I(", ]
-  table_part2=table_part2[order(as.character(table_part2$predictors)), ]
-  
-  table=rbind(table_part1, table_part2)
-  rownames(table)=1:nrow(table)
-  return(table)
-}
-
-
-betas_plot=function(betas_table, sd_table=NULL, lines=TRUE, time_interval=study_period){
-  x_year=rep(time_interval, each=nrow(betas_table))
-  
-  predictors=rep(betas_table[, "predictors"], times=length(time_interval))
-  y_betas=as.numeric(as.character(unlist(betas_table[, !(names(betas_table)=="predictors")])))
-  
-  pal=palette(betas_table[, "predictors"])
-  df=data.frame(cbind(x_year, as.character(predictors), y_betas))
-  
-  graph=ggplot(data=df, aes(x_year, as.numeric(as.character(y_betas)), group=predictors)) +
-             geom_point(aes(color=predictors)) + scale_color_manual(values=pal) + 
-             ggtitle(i) + xlab(expression("Year")) + ylab(expression("Predictor value"))
-  
-  if(lines==TRUE){graph=graph+geom_line(aes(color=predictors))}
-  
-  if(!is.null(sd_table)){
-    ci=2*as.numeric(as.character(unlist(sd_table[, 2:5])))
-    df=data.frame(cbind(x_year, as.character(predictors), y_betas, ci))
-    
-    ci_minus=y_betas-ci
-    ci_bonus=y_betas+ci
-    
-    graph=graph+geom_errorbar(aes(
-      x=x_year, ymin=as.numeric(as.character(ci_minus)), ymax=as.numeric(as.character(ci_bonus)), color=predictors), 
-      width=0.1)}
-  
-  return(plot(graph))
-}
-
-
-models2=function(model_number, 
-                 model_method="dwpr", raster_method="density", sigma=140, 
-                 time_interval=study_period, predictors_local=predictors, 
-                 ski_routes, modified_ski_routes, environmental_raster=env_r_champ, 
-                 output="intensity_table"){
-  #Distance rasters creation
-  if(raster_method=="distance"){
-    old_r=distance(rasterize(ski_routes, environmental_raster))
-    old_r=mask(crop(old_r, extent(contour_champ)), contour_champ)
-    
-    new_r=distance(rasterize(modified_ski_routes, environmental_raster))
-    new_r=mask(crop(new_r, extent(contour_champ)), contour_champ)
-  } else {
-    ski_routes_points=st_coordinates(st_cast(ski_routes, "POINT")[, "geometry"])
-    ppp_object=ppp(ski_routes_points[, 1], ski_routes_points[, 2], window=as.owin(contour_champ))
-    
-    old_r=raster(density(ppp_object, sigma=sigma))
-    old_r=resample(old_r, environmental_raster)
-    crs(old_r)="+proj=lcc +lat_1=49 +lat_2=44 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +units=m +no_defs"
-    
-    if(substr(substitute(modified_ski_routes), nchar(substitute(modified_ski_routes))-1, nchar(substitute(modified_ski_routes)))!="_r"){
-      ski_routes_wlb_points=st_coordinates(st_cast(modified_ski_routes, "POINT")[, "geometry"])
-      ppp_object=ppp(ski_routes_wlb_points[, 1], ski_routes_wlb_points[, 2], window=as.owin(contour_champ))
-      
-      new_r=raster(density(ppp_object, sigma=sigma))
-      new_r=resample(new_r, environmental_raster)
-      crs(new_r)="+proj=lcc +lat_1=49 +lat_2=44 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +units=m +no_defs"
-    } else {
-      new_r=resample(modified_ski_routes, old_r)
-    }
-  }
-  difference_map=old_r-new_r #Difference map raster
-  maps=list(old_r, new_r, difference_map) #Maps collection
-  names(maps)=c("old_r", "new_r", "difference_map")
-  
-  
-  #Manual normalisation
-  mean_old_r=mean(getValues(old_r), na.rm=TRUE)
-  sd_old_r=sd(getValues(old_r), na.rm=TRUE)
-  norm_old_r=(old_r-mean_old_r)/sd_old_r
-  
-  norm_new_r=(new_r-mean_old_r)/sd_old_r
-  
-  
-  #Adapting environmental rasters
-  m_env_r=dropLayer(environmental_raster, "Ski")
-  m_env_r=addLayer(m_env_r, norm_old_r)
-  names(m_env_r)=c(names(env_r)[!(names(env_r) %in% "Ski")], "Ski")
-  
-  m_new_env_r=dropLayer(environmental_raster, "Ski")
-  m_new_env_r=addLayer(m_new_env_r, norm_new_r)
-  names(m_new_env_r)=c(names(env_r)[!(names(env_r) %in% "Ski")], "Ski")
-  
-  
-  #Model computation
-  ##Keeping only the predictors of the model
-  m_new_env_r=subset(m_new_env_r, predictors_local)
-  m_new_env_r_table=as.data.frame(na.omit(rasterToPoints(m_new_env_r)))
-
-  for (i in time_interval){
-    m_yearly_model=models(model_number=paste0(model_number, "_", i), model_method=model_method, time_interval=i, environmental_raster=m_env_r, background_points=get(paste0("bg_pts_", i)), output="all")
-    
-    ##Betas_list
-    if(i==study_period[1]){m_betas_table=m_yearly_model[[2]][[1]]}
-    else {m_betas_table=merge(m_betas_table, m_yearly_model[[2]][[1]], by="predictors", all.x = TRUE, all.y = TRUE)}
-    
-    if(model_method=="dwpr"){ #Sd_list
-      if(i==study_period[1]){m_sd_table=m_yearly_model[[2]][[2]]}
-      else {m_sd_table=merge(m_sd_table, m_yearly_model[[2]][[2]], by="predictors", all.x = TRUE, all.y = TRUE)}
-    }
-    
-    
-    #Reevaluation of the model with alternative ski routes raster
-    new_predictor=m_new_env_r_table[, c("x", "y")]
-    if(model_method=="dwpr"){new_predictor$predicted=predict(m_yearly_model[[1]], m_new_env_r_table, type="response")}
-    else {new_predictor$predicted=predict(m_yearly_model[[1]], m_new_env_r_table, type="exponential", clamp=FALSE)[, 1]}
-    
-    new_map=raster::rasterFromXYZ(new_predictor, res=c(25,25))
-    crs(new_map)<-"+proj=lcc +lat_1=49 +lat_2=44 +lat_0=46.5 +lon_0=3 +x_0=700000 +y_0=6600000 +ellps=GRS80 +units=m +no_defs"
-    
-    difference_map=new_map-m_yearly_model[[3]] #Difference map
-    
-    
-    #Collection of the results
-    ##Models
-    if(i==study_period[1]){models_stack=list(m_yearly_model[[1]])}
-    else {models_stack[[length(models_stack)+1]]=m_yearly_model[[1]]}
-    
-    
-    ##Intensity table
-    m_intensity=data.frame(c("old_map_indices_sum", "new_map_indices_sum", "percentage_diff_density_indices"),
-                           c(round(cellStats(m_yearly_model[[3]], "sum"), digits=2), #old_map
-                             round(cellStats(new_map, "sum"), digits=2), #new_map
-                             round(((cellStats(difference_map, "sum")*100)/cellStats(new_map, "sum")), digits=2))) #% of difference between both
-    colnames(m_intensity)=c("legend", paste0(model_number, "_", i))
-    rownames(m_intensity)=1:nrow(m_intensity)
-    
-    if(i==study_period[1]){intensity_table=m_intensity}
-    else {intensity_table=merge(intensity_table, m_intensity, by="legend", all.x = TRUE, all.y = TRUE)}
-    
-    ##Maps
-    m_maps=list(m_yearly_model[[3]], new_map, difference_map)
-    names(m_maps)=c(paste0(model_number, "_", i, "_map"), paste0(model_number, "_", i, "_mod_map"), paste0(model_number, "_", i, "_diff_map"))
-    maps=append(maps, m_maps)
-  }
-  names(models_stack)=paste0(model_number, "_", time_interval)
-  
-  m_betas_table=model_table_reorderer(m_betas_table)
-  if(model_method=="dwpr"){
-    m_sd_table=model_table_reorderer(m_sd_table)
-    tables=list(m_betas_table, m_sd_table, intensity_table)
-    names(tables)=c("betas_table", "sd_table", "intensity_table")
-  } else {
-    tables=list(m_betas_table, intensity_table)
-    names(tables)=c("betas_table", "intensity_table")
-  }
-  
-  if(output!="all"){return(get(output))} 
-  else {
-    if(model_method=="dwpr"){list=list(models_stack, tables, maps)}
-    else {list=list(models_stack, m_betas_table, maps)}}
-  names(list)=c("models_stack", "tables", "maps")
-  return(list)
+  return(r)
 }
 ```
 
 
+
+
+
+# PRÉPARATION DES FICHIERS
+## MNT
+### Importation du MNT et sélection des zones de plus de 600m d'altitude
 ```{r}
-study_period=sort(intersect(unique(tracks_dataset$year), unique(points_dataset$Annee)))
-predictors=c("Gha", "Tree_density20sd", "Tree_densityinf10", "middle_gap", "grassland", "Tree_gini", "Ski")
-m_env_r_champ<-subset(env_r_champ, predictors)``
+mnt=raster(paste0(chemin, "LiDAR/1-Bruts/MNT_25m.tif"))
 
+mnt_ze=mask(crop(mnt, extent(contour)), contour)
+crs(mnt_ze)<-2154
 
-#Background points creation to ensure comparison between models
-bg_pts_all=background_points_creator(study_period)
-for(i in study_period){
-  yearly_background_points=background_points_creator(i)
-  assign(paste0("bg_pts_", i), yearly_background_points)}
+mnt_ze=as.data.frame(mnt_ze, xy=T)
+mnt_600=subset(mnt_ze, mnt_ze$MNT_25m>=600)
+mnt_600=mnt_600[!is.na(mnt_600), ]
+mnt_600=rasterFromXYZ(mnt_600)
+crs(mnt_600)<-2154
 
+map %>% addRasterImage(mnt_600)
 
-m0_map=models("m0", "maxent", study_period, predictors, bg_pts_all)
-
-plot(m0_map, main="m0_map")
-writeRaster(m0_map, paste0(owndatapath, "/", "m0_map.tif"), overwrite=TRUE, NAflag=-9999, options=c("COMPRESS=LZW"))
+#writeRaster(mnt_600, paste0(chemin, "test.tif"), overwrite=T)
+rm(list=c("mnt", "mnt_ze"))
 ```
 
-# Impact des sentiers et 
+### Création d'un contour des zones à plus de 600m d'altitude
 ```{r}
-#Impacts des autoroutes
+contour_mnt_600=st_as_sf(st_as_stars(mnt_600), as_points=F, merge=T)
+contour_mnt_600=st_union(contour_mnt_600)
+saveRDS(contour_mnt_600, paste0(chemin, "R/Sauvegarde_objets_R/contour_mnt_600.rds"))
 
-#Impacts des sentiers, chemins et routes empierrés
+contour_mnt_600_sp=as(contour_mnt_600, "Spatial")
 
-#Impact des routes
+map %>% addPolygons(data=st_transform(contour_mnt_600, 4326))
+
+rm("mnt_600")
 ```
+
+
+
+## BDs
+### BD FORÊT
+```{r}
+bd_foret_ain=st_read(paste0(chemin, "QGIS/Construction/FORMATION_VEGETALE.shp"))
+bd_foret_ze=st_intersection(bd_foret_ain, contour)
+
+map %>% addPolygons(data=st_transform(bd_foret_ze, 4326))
+
+env_cleaner("bd_foret_ain")
+```
+
+### BD TOPO
+```{r}
+bd_topo_ain_elec=st_read(paste0(chemin, "QGIS/Construction/BDT_3-0_GPKG_LAMB93_D001-ED2021-12-15.gpkg"), layer="ligne_electrique")
+bd_topo_ze_elec=st_intersection(bd_topo_ain_elec, contour)
+map %>% addPolylines(data=st_transform(bd_topo_ze_elec, 4326))
+saveRDS(bd_topo_ze_elec, paste0(chemin, "R/Sauvegarde_objets_R/bd_topo_ze_elec.rds"))
+
+bd_topo_ain_train=st_read(paste0(chemin, "QGIS/Construction/BDT_3-0_GPKG_LAMB93_D001-ED2021-12-15.gpkg"), layer="troncon_de_voie_ferree")
+bd_topo_ze_train=st_intersection(bd_topo_ain_train, contour)
+map %>% addPolylines(data=st_transform(bd_topo_ze_train, 4326))
+saveRDS(bd_topo_ze_train, paste0(chemin, "R/Sauvegarde_objets_R/bd_topo_ze_train.rds"))
+
+bd_topo_ain_routes=st_read(paste0(chemin, "QGIS/Construction/BDT_3-0_GPKG_LAMB93_D001-ED2021-12-15.gpkg"), layer="troncon_de_route")
+bd_topo_ze_routes_global=st_intersection(bd_topo_ain_routes, contour)
+map %>% addPolylines(data=st_transform(bd_topo_ze_routes_global, 4326))
+saveRDS(bd_topo_ze_routes_global, paste0(chemin, "R/Sauvegarde_objets_R/bd_topo_ze_routes_global.rds"))
+
+
+bd_topo_ze_autoroutes=bd_topo_ze_routes_global[bd_topo_ze_routes_global$nature=="Type autoroutier", ]
+map %>% addPolylines(data=st_transform(bd_topo_ze_autoroutes, 4326))
+saveRDS(bd_topo_ze_autoroutes, paste0(chemin, "R/Sauvegarde_objets_R/bd_topo_ze_autoroutes.rds"))
+
+bd_topo_ze_routes=bd_topo_ze_routes_global[bd_topo_ze_routes_global$nature=="Route à 1 chaussée", ]
+map %>% addPolylines(data=st_transform(bd_topo_ze_routes, 4326))
+saveRDS(bd_topo_ze_routes, paste0(chemin, "R/Sauvegarde_objets_R/bd_topo_ze_routes.rds"))
+
+bd_topo_ze_chemins=bd_topo_ze_routes_global[bd_topo_ze_routes_global$nature %in% c("Chemin", "Sentier", "Route empierrée"), ]
+map %>% addPolylines(data=st_transform(bd_topo_ze_chemins, 4326))
+saveRDS(bd_topo_ze_chemins, paste0(chemin, "R/Sauvegarde_objets_R/bd_topo_ze_chemins.rds"))
+
+env_cleaner("bd_topo_ain_")
+```
+
+
+
+
+
+## LiDAR
+### Récupération de toutes les couches LiDAR et coupage
+```{r}
+fichiers_dispo=list.files(paste0(chemin, "LiDAR/1-Bruts/"), full.names=T)
+fichiers_dispo=fichiers_dispo[!grepl("JURA", fichiers_dispo)] #Enlève les fichiers qui concernent le Jura dans les fichiers dispos
+
+lidar_stack=list()
+pattern=c("AINraster_MV_1_8ha_Meancor_", "Distance_MV_1_8ha_", "raster_MV_1_8ha_Mean_", "MNT")
+
+for(i in 1:length(pattern)){
+  p=pattern[i]
+  
+  stack=stack(fichiers_dispo[grepl(p, fichiers_dispo)], quick=T)
+  if(i!=4){names(stack)=lapply(names(stack), function(x){substr(x, nchar(p)+1, nchar(x))})} else {names(stack)="altitude"}
+  
+  stack=mask(crop(stack, extent(contour)), contour)
+  crs(stack)<-2154
+  
+  lidar_stack[[i]]=stack
+}
+lidar_stack=stack(lidar_stack)
+
+map %>% addRasterImage(lidar_stack$CHM.mean)
+#for(i in names(lidar_stack)){writeRaster(lidar_stack[[i]], paste0(chemin, "LiDAR/2-Coupés/", i, ".tif"), overwrite=T)}
+
+lidar_stack=normImage(lidar_stack, norm=T)
+#for(i in names(lidar_stack)){writeRaster(lidar_stack[[i]], paste0(chemin, "LiDAR/3-Normalisés/", i, ".tif"), overwrite=T)}
+
+rm(list=c("fichiers_dispo", "pattern", "stack"))
+```
+
+### Suppression des zones du LiDAR inférieures à 600m d'altitude
+```{r}
+lidar_stack_600=mask(crop(lidar_stack, extent(as(contour_mnt_600, "Spatial"))), as(contour_mnt_600, "Spatial"))
+
+map %>% addRasterImage(lidar_stack_600$CHM.mean)
+saveRDS(lidar_stack_600, paste0(chemin, "/R/Sauvegarde_objets_R/lidar_stack_600.rds"))
+
+rm("lidar_stack")
+```
+
+
+
+## Points de présence
+### Intialisation
+```{r}
+ze=contour_mnt_600_sp
+
+
+#Création d'une base de points pour l'application du GRTSe
+ze_points=as.data.frame(lidar_stack_600$CHM.mean, xy=T)
+#ze_points=geometry_rebuilder(ze_points$x, ze_points$y)
+
+geometry=NULL
+
+x=unlist(as.numeric(ze_points$x))
+y=unlist(as.numeric(ze_points$y))
+
+geometry=mclapply(1:length(x), function(i){st_geometry(st_point(c(x[i], y[i])))}, mc.cores=detectCores())
+
+#for(i in 1:length(x)){geometry=rbind(geometry, st_geometry(st_point(c(x[i], y[i]))))}
+geometry2=do.call(rbind, geometry)
+ze_points=st_sfc(geometry2)
+st_crs(ze_points)<-2154
+
+
+ze_points=ze_points[st_within(ze_points, contour_mnt_600, sparse=F)]
+ze_points=ze_points[-112236] #Correction manuelle d'une erreur
+
+saveRDS(ze_points, paste0(chemin, "R/Sauvegarde_objets_R/ze_points.rds"))
+
+ze_points_df=data.frame(ze_points)
+
+rm(list=c("contour_mnt_600_sp", "geometry", "x", "y", "geometry2", "contour_mnt_600"))
+```
+
+
+### Ajout des variables à prendre en compte
+#### Sélection des variables du modèle
+```{r}
+predicteurs=names(lidar_stack_600)
+predicteurs_selectionnes=c("H.max", "Gha", "propConifG2", "CHM.mean", "G.s1000_Inf", "G.s200_1000", "G.s20_200", "Tree.density", "CHM0.sd", "altitude")
+
+rm("predicteurs")
+```
+
+
+#### Génération des points
+```{r}
+points_presence=list()
+
+for(i in predicteurs_selectionnes){
+  ze_points_df[, i]=raster::extract(lidar_stack_600[[i]], as_Spatial(ze_points))
+  if(i %in% c("G.s1000_inf", "G.s200_1000", "G.s20_200", "Tree.density")){ze_points_df[, i]=(ze_points_df[, i]-mean(ze_points_df[, i], na.rm=T))^2} else {ze_points_df[, i]=exp(ze_points_df[, i]/100)} #Facteur multiplicatif bidouillé pour augmenter les probabilités des points les plus hauts d'être tirés
+  
+  sans_na=st_sf(ze_points_df)
+  
+  
+  sans_na=sans_na[!is.na(st_drop_geometry(sans_na[, i])), ]
+  pts_echant=spsurvey::grts(sans_na, n_base=300, seltype="proportional", aux_var=i)
+  
+  if(i=="Tree.density"){pts_echant$sites_base=pts_echant$sites_base[pts_echant$sites_base$Tree.density<(mean(pts_echant$sites_base$Tree.density, na.rm=T)-0.01), ]}
+  
+  points_presence[[i]]=pts_echant$sites_base
+  
+  print(map %>% 
+          addCircles(data=st_transform(pts_echant$sites_base, 4326)) %>% 
+          addRasterImage(lidar_stack_600[[i]]) %>%
+          addControl(tags$div(HTML(i)), position="topright"))
+
+  
+  # pts_altitude_df=data.frame(pts_echant$sites_base)
+  # pts_altitude_df$altitude=raster::extract(mnt_600, as_Spatial(pts_altitude$sites_base))
+  # median(pts_altitude_df$altitude)
+}
+
+rm("sans_na")
+```
+
+#### Réorganisation des points
+```{r}
+for(i in names(points_presence)){
+  points_presence[[i]]=points_presence[[i]][, !(colnames(points_presence[[i]]) %in% predicteurs_selectionnes[predicteurs_selectionnes != i])]
+  
+  colnames(points_presence[[i]])[colnames(points_presence[[i]])==i]="var_env"
+}
+
+points_presence=do.call(rbind, points_presence)
+
+map %>% addCircles(data=st_transform(points_presence, 4326))
+```
+
+#### Suppression des points à proximité des routes (impact de la fréquentation) et des zones ouvertes
+```{r}
+temp=data.frame(st_distance(points_presence, bd_topo_ze_routes_global))
+for(i in 1:nrow(points_presence)){points_presence[i, "distance_min"]=min(temp[i, ], na.rm=T)}
+
+points_presence=points_presence[points_presence$distance_min>50, ]
+points_presence$coeff=exp(points_presence$distance_min)
+
+pts_echant=spsurvey::grts(points_presence, n_base=1000, seltype="proportional", aux_var="distance_min")
+pts_echant=pts_echant$sites_base
+
+map %>% 
+  addCircles(data=st_transform(points_presence, 4326), col='red') %>% 
+  addCircles(data=st_transform(pts_echant, 4326), col='black', opacity=1)
+
+st_write(pts_echant, paste0(chemin, "R/Objets_extraits_de_R/Vecteurs/points_presence.gpkg"))
+
+rm("temp")
+```
+
+
 
 
 
