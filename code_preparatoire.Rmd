@@ -5,6 +5,8 @@ output: html_notebook
 
 # INTIALISATION
 ```{r setup}
+invisible(lapply(c("raster", "sf", "leaflet", "stars", "RStoolbox", "sp", "spsurvey", "htmlwidgets", "htmltools", "spatstat", "maxnet", "parallel", "foreach", "doSNOW", "doParallel"), install.packages, character.only=T)) #Importation des packages
+
 invisible(lapply(c("raster", "sf", "leaflet", "stars", "RStoolbox", "sp", "spsurvey", "htmlwidgets", "htmltools", "spatstat", "maxnet", "parallel", "foreach", "doSNOW", "doParallel"), library, character.only=T)) #Importation des packages
 
 chemin="/Users/vincent/Documents/Initiation_QGIS_R/"
